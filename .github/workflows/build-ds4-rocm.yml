@@ -180,9 +180,27 @@ jobs:
           set -euo pipefail
           # 81 GiB, so it is fetched once and reused. Self-hosted runners keep
           # it between runs; a daily re-download would be untenable.
-          MODEL_DIR="${MODEL_DIR:-$HOME/ds4-models}"
+          # $HOME can be a small system partition — on these runners it is a
+          # 137 GB root overlay with ~25 GB free, while the 1.7 TB disk is
+          # mounted under the runner root. Default beside _work so the cache
+          # lands on the big disk and survives between runs.
+          default_dir="$HOME/ds4-models"
+          if [ -n "${RUNNER_WORKSPACE:-}" ]; then
+            default_dir="$(dirname "$RUNNER_WORKSPACE")/ds4-models"
+          fi
+          MODEL_DIR="${MODEL_DIR:-$default_dir}"
           file=DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf
           mkdir -p "$MODEL_DIR"
+
+          # Fail legibly: an out-of-space xet download reports "Internal Writer
+          # Error", which reads like a corrupt transfer rather than a full disk.
+          need_gib=90
+          avail_gib=$(df -BG --output=avail "$MODEL_DIR" | tail -1 | tr -dc '0-9')
+          echo "model cache: $MODEL_DIR (${avail_gib} GiB free, need ${need_gib})"
+          if [ ! -s "$MODEL_DIR/$file" ] && [ "$avail_gib" -lt "$need_gib" ]; then
+            echo "::error::Not enough space for the 81 GiB test model in $MODEL_DIR (${avail_gib} GiB free). Set DS4_MODEL_DIR to a larger filesystem."
+            exit 1
+          fi
           if [ ! -s "$MODEL_DIR/$file" ]; then
             echo "Seeding test model into $MODEL_DIR (one-time, ~81 GiB)"
             hf download antirez/deepseek-v4-gguf "$file" --local-dir "$MODEL_DIR"
