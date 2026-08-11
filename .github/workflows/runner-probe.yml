@@ -1,0 +1,40 @@
+name: Runner probe
+
+# Dispatch-only helper: confirms which runner labels this repo can actually
+# reach, and that the machine behind them has the GPU we expect. Runner groups
+# are not visible through the REST API without org-admin scope, so the reliable
+# way to find out is to ask a job to run there.
+#
+# Times out fast: an unmatched label set queues forever, which is the failure
+# mode worth surfacing quickly.
+
+on:
+  workflow_dispatch:
+    inputs:
+      labels:
+        description: 'JSON array of runner labels, e.g. ["self-hosted","stx-halo","Linux"]'
+        required: true
+        default: '["self-hosted","stx-halo","Linux"]'
+
+jobs:
+  probe:
+    runs-on: ${{ fromJson(inputs.labels) }}
+    timeout-minutes: 5
+    steps:
+      - name: Report the runner
+        run: |
+          echo "runner name : ${RUNNER_NAME:-unknown}"
+          echo "hostname    : $(hostname)"
+          echo "os          : $(uname -srm)"
+          echo "labels asked: ${{ inputs.labels }}"
+      - name: Report the GPU
+        run: |
+          if command -v rocminfo >/dev/null 2>&1; then
+            rocminfo 2>/dev/null | grep -m3 -E 'gfx[0-9]+' || echo "rocminfo found no gfx target"
+          else
+            echo "rocminfo not on PATH"
+          fi
+          for c in /sys/class/drm/card*/device/mem_info_gtt_total; do
+            [ -e "$c" ] && echo "GTT total: $(( $(cat "$c") / 1024 / 1024 / 1024 )) GiB"
+          done
+          command -v hf >/dev/null 2>&1 && echo "hf CLI: present" || echo "hf CLI: MISSING (needed to seed the test model)"
