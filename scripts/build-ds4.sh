@@ -74,6 +74,17 @@ LIB_DIR="$(readlink -f "$ROCM_DIR/lib")"
 # library names. ROCm distributions differ in what they pull in — TheRock's
 # hipBLASLt needs liborigami, distro ROCm does not — and a fixed list silently
 # produces a bundle that only runs on the machine that built it.
+# Index every shared object in the ROCm tree by basename. TheRock nests things
+# the distro layout does not (llvm/lib, rocm_sysdeps/lib), so looking only in
+# $ROCM_DIR/lib misses libLLVM, libclang-cpp and the rocm_sysdeps libraries that
+# libamd_comgr needs.
+declare -A LIBINDEX=()
+while read -r p; do
+    base="$(basename "$p")"
+    [ -n "${LIBINDEX[$base]:-}" ] || LIBINDEX[$base]="$p"
+done < <(find -L "$ROCM_DIR" -name '*.so*' -type f 2>/dev/null)
+say "indexed ${#LIBINDEX[@]} shared objects under $ROCM_DIR"
+
 declare -A SEEN=()
 queue=()
 for b in $BINS; do queue+=("$OUT_DIR/$b"); done
@@ -84,14 +95,13 @@ while [ ${#queue[@]} -gt 0 ]; do
         [ -n "$need" ] || continue
         [ -n "${SEEN[$need]:-}" ] && continue
         SEEN[$need]=1
-        src="$LIB_DIR/$need"
-        [ -e "$src" ] || continue          # not ROCm-provided; base system lib
-        cp -a "$src" "$OUT_DIR/" 2>/dev/null || true
-        real="$(readlink -f "$src")"
-        if [ "$real" != "$src" ] && [ -e "$real" ]; then
-            cp -a "$real" "$OUT_DIR/" 2>/dev/null || true
-        fi
-        queue+=("$real")
+        src="${LIBINDEX[$need]:-}"
+        [ -n "$src" ] && [ -e "$src" ] || continue   # not ROCm-provided; base system lib
+        # -L dereferences: SONAMEs are usually symlinks into a versioned file,
+        # and copying the link itself would leave a dangling entry in a flat
+        # bundle. Copy the content under the name the loader asks for.
+        cp -aL "$src" "$OUT_DIR/$need" 2>/dev/null || true
+        queue+=("$src")
     done < <(objdump -p "$cur" 2>/dev/null | awk '/NEEDED/{print $2}')
 done
 for d in hipblaslt rocblas; do
