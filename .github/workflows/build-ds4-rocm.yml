@@ -1,0 +1,203 @@
+name: Build ds4 + ROCm
+
+# ds4 publishes no binaries, no releases and no tags, so this workflow is the
+# only source of prebuilt ds4 for ROCm. Modelled on
+# lemonade-sdk/llamacpp-rocm's build workflow.
+#
+# Release identity is our own monotonic bNNNN build number; the upstream ds4
+# commit SHA is recorded in the release notes and is the real identity.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ds4_ref:
+        description: 'Upstream ds4 ref or commit SHA to build'
+        required: false
+        default: 'main'
+      gfx_target:
+        description: 'Comma-separated GPU targets (only gfx1151 is validated upstream)'
+        required: false
+        default: 'gfx1151'
+      rocm_version:
+        description: 'TheRock ROCm dist version, or "latest"'
+        required: false
+        default: 'latest'
+      create_release:
+        description: 'Publish a bNNNN release'
+        required: false
+        default: 'true'
+  pull_request:
+    paths:
+      - '.github/workflows/build-ds4-rocm.yml'
+      - 'scripts/**'
+  schedule:
+    # Daily, after TheRock nightlies land.
+    - cron: '0 14 * * *'
+
+env:
+  GFX_TARGETS: ${{ github.event.inputs.gfx_target || 'gfx1151' }}
+  ROCM_VERSION: ${{ github.event.inputs.rocm_version || 'latest' }}
+  DS4_REF: ${{ github.event.inputs.ds4_ref || 'main' }}
+
+jobs:
+  prepare:
+    runs-on: ubuntu-22.04
+    outputs:
+      matrix: ${{ steps.set.outputs.matrix }}
+      ds4_sha: ${{ steps.sha.outputs.ds4_sha }}
+      ds4_sha_short: ${{ steps.sha.outputs.ds4_sha_short }}
+    steps:
+      - id: set
+        run: |
+          matrix=$(echo "$GFX_TARGETS" | tr ',' '\n' | sed '/^$/d' \
+            | jq -R . | jq -s '{gfx_target: .}' -c)
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          echo "Matrix: $matrix"
+
+      - id: sha
+        run: |
+          # Resolve the ref once so every target in the matrix builds the exact
+          # same upstream commit, even if main moves mid-run.
+          sha=$(git ls-remote https://github.com/antirez/ds4.git "$DS4_REF" | cut -f1)
+          if [ -z "$sha" ]; then
+            # Not a ref name — assume it is already a SHA.
+            sha="$DS4_REF"
+          fi
+          echo "ds4_sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "ds4_sha_short=${sha:0:7}" >> "$GITHUB_OUTPUT"
+          echo "ds4 commit: $sha"
+
+  build:
+    needs: prepare
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc || true
+          df -h /
+
+      - name: Resolve and download TheRock ROCm dist
+        id: rocm
+        run: |
+          set -euo pipefail
+          base_url="https://rocm.nightlies.amd.com/tarball-multi-arch"
+          target="${{ matrix.gfx_target }}"
+          if [ "$ROCM_VERSION" = "latest" ]; then
+            file=$(curl -sS "$base_url/" \
+              | grep -oE "therock-dist-linux-${target}-[0-9]+\.[0-9]+\.[0-9]+(a|rc)[0-9]+\.tar\.gz" \
+              | sort -u | tail -1)
+            [ -n "$file" ] || { echo "No TheRock dist found for $target"; exit 1; }
+            version=$(echo "$file" | sed -E "s/therock-dist-linux-${target}-(.*)\.tar\.gz/\1/")
+          else
+            version="$ROCM_VERSION"
+            file="therock-dist-linux-${target}-${version}.tar.gz"
+          fi
+          echo "Using ROCm $version ($file)"
+          curl -fSL -o /tmp/rocm.tar.gz "$base_url/$file"
+          mkdir -p "$HOME/rocm"
+          tar -xzf /tmp/rocm.tar.gz -C "$HOME/rocm"
+          rm -f /tmp/rocm.tar.gz
+          echo "rocm_version=$version" >> "$GITHUB_OUTPUT"
+          echo "rocm_dir=$HOME/rocm" >> "$GITHUB_OUTPUT"
+
+      - name: Build ds4
+        env:
+          ROCM_DIR: ${{ steps.rocm.outputs.rocm_dir }}
+          GFX: ${{ matrix.gfx_target }}
+          DS4_REF: ${{ needs.prepare.outputs.ds4_sha }}
+        run: |
+          chmod +x scripts/build-ds4.sh
+          ./scripts/build-ds4.sh "$PWD/stage/ds4-rocm-${{ matrix.gfx_target }}"
+
+      - name: Package
+        id: package
+        run: |
+          set -euo pipefail
+          name="ds4-${{ needs.prepare.outputs.ds4_sha_short }}-linux-rocm-${{ matrix.gfx_target }}-x64"
+          mv "stage/ds4-rocm-${{ matrix.gfx_target }}" "stage/$name"
+          tar -C stage -czf "$name.tar.gz" "$name"
+          ls -lh "$name.tar.gz"
+          echo "artifact=$name.tar.gz" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ds4-${{ matrix.gfx_target }}
+          path: ${{ steps.package.outputs.artifact }}
+          retention-days: 7
+
+  release:
+    needs: [prepare, build]
+    runs-on: ubuntu-22.04
+    if: >
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.create_release != 'false') ||
+      github.event_name == 'schedule'
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: ./artifacts
+
+      - name: Generate release tag
+        id: tag
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          latest=$(gh release list --limit 1000 --json tagName --jq '.[].tagName' \
+            | grep -E '^b[0-9]{4}$' | sort -V | tail -1 || true)
+          if [ -z "$latest" ]; then
+            tag="b0001"
+          else
+            n=$((10#${latest#b} + 1))
+            tag=$(printf 'b%04d' "$n")
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "Next tag: $tag"
+
+      - name: Skip if this ds4 commit was already released
+        id: dedupe
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          sha="${{ needs.prepare.outputs.ds4_sha }}"
+          # The daily schedule would otherwise republish an identical build every
+          # day that upstream is quiet.
+          if gh release list --limit 20 --json tagName --jq '.[].tagName' | while read -r t; do
+               gh release view "$t" --json body --jq .body 2>/dev/null | grep -q "$sha" && echo FOUND
+             done | grep -q FOUND; then
+            echo "already_released=true" >> "$GITHUB_OUTPUT"
+            echo "ds4 $sha already has a release; skipping."
+          else
+            echo "already_released=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create release
+        if: steps.dedupe.outputs.already_released == 'false'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          files=$(find ./artifacts -name '*.tar.gz' | tr '\n' ' ')
+          [ -n "$files" ] || { echo "No artifacts to publish"; exit 1; }
+          gh release create "${{ steps.tag.outputs.tag }}" \
+            --title "${{ steps.tag.outputs.tag }}" \
+            --notes "**Build Number**: ${{ steps.tag.outputs.tag }}
+          **Operating System(s)**: ubuntu
+          **GPU Target(s)**: ${{ env.GFX_TARGETS }}
+          **ROCm Version**: see asset build log
+          **ds4 Commit Hash**: ${{ needs.prepare.outputs.ds4_sha }}
+          **Build Date**: $(date -u '+%Y-%m-%d %H:%M:%S UTC')
+
+          Prebuilt [ds4](https://github.com/antirez/ds4) (DwarfStar 4) binaries for ROCm, with the ROCm runtime libraries bundled so no system ROCm install is required.
+
+          Experimental. Only gfx1151 is validated upstream." \
+            $files
