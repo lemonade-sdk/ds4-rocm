@@ -93,12 +93,21 @@ fi
 if [ ! -f "$MODEL" ]; then
     fail "MODEL is set but not found: $MODEL"
 fi
-ram_gib=$(awk '/MemTotal/{printf "%d", $2/1048576}' /proc/meminfo)
-if [ "$ram_gib" -lt "${MIN_RAM_GIB:-100}" ]; then
-    say "SKIPPED inference: host has ${ram_gib} GiB RAM, need >= ${MIN_RAM_GIB:-100}"
+# Capacity is GPU-accessible memory, not system RAM. Strix Halo can be
+# configured either way round: a large BIOS VRAM carve-out with a small GTT
+# aperture, or minimal VRAM with GTT raised to most of RAM. Both can hold the
+# model; only their sum matters.
+gpu_gib=0
+for f in /sys/class/drm/card*/device/mem_info_vram_total /sys/class/drm/card*/device/mem_info_gtt_total; do
+    [ -e "$f" ] || continue
+    gpu_gib=$(( gpu_gib + $(cat "$f") / 1024 / 1024 / 1024 ))
+done
+if [ "$gpu_gib" -lt "${MIN_GPU_GIB:-90}" ]; then
+    say "SKIPPED inference: ${gpu_gib} GiB GPU-accessible (VRAM+GTT), need >= ${MIN_GPU_GIB:-90}"
     say "link-level checks passed"
     exit 0
 fi
+say "GPU-accessible memory: ${gpu_gib} GiB"
 
 say "running inference on $EXPECT_ARCH"
 out=$(timeout 1800 ./ds4 -m "$MODEL" \

@@ -172,7 +172,7 @@ jobs:
         if: ${{ vars.DS4_ENABLE_INFERENCE_TEST == 'true' }}
         id: model
         env:
-          MODEL_DIR: ${{ vars.DS4_MODEL_DIR || '/opt/ds4-models' }}
+          MODEL_DIR: ${{ vars.DS4_MODEL_DIR || format('{0}/ds4-models', env.HOME) }}
         run: |
           set -euo pipefail
           # 81 GiB, so it is fetched once and reused. Self-hosted runners keep
@@ -189,7 +189,7 @@ jobs:
         env:
           MODEL: ${{ steps.model.outputs.path }}
           MIN_TPS: ${{ vars.DS4_MIN_TPS || '8' }}
-          MIN_RAM_GIB: ${{ vars.DS4_MIN_RAM_GIB || '100' }}
+          MIN_GPU_GIB: ${{ vars.DS4_MIN_GPU_GIB || '90' }}
         run: |
           chmod +x scripts/smoke-test.sh
           ./scripts/smoke-test.sh "${{ steps.unpack.outputs.dir }}"
