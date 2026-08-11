@@ -123,7 +123,12 @@ jobs:
         id: package
         run: |
           set -euo pipefail
-          name="ds4-${{ needs.prepare.outputs.ds4_sha_short }}-linux-rocm-${{ matrix.gfx_target }}-x64"
+          # Deliberately no commit SHA in the name: consumers (lemonade) build
+          # the asset filename from the release tag plus the detected GPU arch,
+          # so it has to be derivable from the tag alone. The release job
+          # prefixes the tag; the upstream SHA lives in the release notes and in
+          # ds4-commit.txt inside the archive.
+          name="ds4-linux-rocm-${{ matrix.gfx_target }}-x64"
           mv "stage/ds4-rocm-${{ matrix.gfx_target }}" "stage/$name"
           tar -C stage -czf "$name.tar.gz" "$name"
           ls -lh "$name.tar.gz"
@@ -191,8 +196,16 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          files=$(find ./artifacts -name '*.tar.gz' | tr '\n' ' ')
+          # Stamp the release tag into each asset name so the filename is
+          # derivable from the tag: ds4-<tag>-linux-rocm-<gfx>-x64.tar.gz
+          mkdir -p ./upload
+          for f in $(find ./artifacts -name 'ds4-linux-rocm-*.tar.gz'); do
+            base=$(basename "$f")
+            mv "$f" "./upload/ds4-${{ steps.tag.outputs.tag }}-${base#ds4-}"
+          done
+          files=$(find ./upload -name '*.tar.gz' | tr '\n' ' ')
           [ -n "$files" ] || { echo "No artifacts to publish"; exit 1; }
+          echo "Publishing: $files"
           gh release create "${{ steps.tag.outputs.tag }}" \
             --title "${{ steps.tag.outputs.tag }}" \
             --notes "**Build Number**: ${{ steps.tag.outputs.tag }}
