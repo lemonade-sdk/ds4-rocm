@@ -172,11 +172,15 @@ jobs:
         if: ${{ vars.DS4_ENABLE_INFERENCE_TEST == 'true' }}
         id: model
         env:
-          MODEL_DIR: ${{ vars.DS4_MODEL_DIR || format('{0}/ds4-models', env.HOME) }}
+          # Defaulted in the shell, not in an expression: $HOME is a shell
+          # variable and is empty in the Actions expression context, which
+          # silently produced '/ds4-models' and failed on permissions.
+          MODEL_DIR: ${{ vars.DS4_MODEL_DIR }}
         run: |
           set -euo pipefail
           # 81 GiB, so it is fetched once and reused. Self-hosted runners keep
           # it between runs; a daily re-download would be untenable.
+          MODEL_DIR="${MODEL_DIR:-$HOME/ds4-models}"
           file=DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf
           mkdir -p "$MODEL_DIR"
           if [ ! -s "$MODEL_DIR/$file" ]; then
