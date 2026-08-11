@@ -73,6 +73,34 @@ binary is.
 `ROCM_ARCH` is overridable, so other targets can be *built*. They have not been
 *tested*, and this repo will not publish them until they are.
 
+## How builds are gated
+
+The daily job builds on a GitHub-hosted runner, but hosted runners have no AMD
+GPU, so a green build only proves the bundle is *self-contained* — not that it
+runs. Both bugs this pipeline has hit (a missing `liborigami`, a dangling
+SONAME) were invisible until something executed the binary.
+
+So publishing is gated on a **self-hosted gfx1151 runner**
+(`scripts/smoke-test.sh`), which checks that:
+
+* every ROCm library resolves inside the bundle, not from a system install
+* the model loads on the GPU and answers a greedy prompt correctly
+* generation throughput clears a floor, so a CPU fallback or a bad kernel
+  selection fails rather than shipping quietly
+
+If the test fails, that day's build is simply not published.
+
+Repository variables (all optional):
+
+| variable | default | meaning |
+| --- | --- | --- |
+| `GFX1151_RUNNER_LABELS` | `["self-hosted","stx-halo","Linux"]` | JSON array of runner labels |
+| `DS4_MODEL_DIR` | `/opt/ds4-models` | where the 81 GiB test model is cached |
+| `DS4_MIN_TPS` | `8` | throughput floor (measured ~16-17 t/s) |
+
+The test model is downloaded once and reused; a daily 81 GiB re-download would
+be untenable.
+
 ## Building
 
 The workflow runs on a schedule and on demand. To cut a release manually, run

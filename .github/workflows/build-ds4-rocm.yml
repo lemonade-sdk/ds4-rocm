@@ -140,8 +140,58 @@ jobs:
           path: ${{ steps.package.outputs.artifact }}
           retention-days: 7
 
-  release:
+  # Hosted runners have no AMD GPU, so the build job can only prove the bundle
+  # is self-contained. Everything that has actually broken here was invisible
+  # until the binary ran, so publishing is gated on real gfx1151 hardware.
+  test:
     needs: [prepare, build]
+    runs-on: ${{ fromJson(vars.GFX1151_RUNNER_LABELS || '["self-hosted","stx-halo","Linux"]') }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: ds4-${{ matrix.gfx_target }}
+          path: ./artifact
+
+      - name: Unpack bundle
+        id: unpack
+        run: |
+          set -euo pipefail
+          mkdir -p ./unpacked
+          tar -C ./unpacked -xzf ./artifact/*.tar.gz
+          dir=$(find ./unpacked -maxdepth 1 -mindepth 1 -type d | head -1)
+          echo "dir=$dir" >> "$GITHUB_OUTPUT"
+
+      - name: Ensure the test model is cached on the runner
+        id: model
+        env:
+          MODEL_DIR: ${{ vars.DS4_MODEL_DIR || '/opt/ds4-models' }}
+        run: |
+          set -euo pipefail
+          # 81 GiB, so it is fetched once and reused. Self-hosted runners keep
+          # it between runs; a daily re-download would be untenable.
+          file=DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf
+          mkdir -p "$MODEL_DIR"
+          if [ ! -s "$MODEL_DIR/$file" ]; then
+            echo "Seeding test model into $MODEL_DIR (one-time, ~81 GiB)"
+            hf download antirez/deepseek-v4-gguf "$file" --local-dir "$MODEL_DIR"
+          fi
+          echo "path=$MODEL_DIR/$file" >> "$GITHUB_OUTPUT"
+
+      - name: Smoke test on gfx1151
+        env:
+          MODEL: ${{ steps.model.outputs.path }}
+          MIN_TPS: ${{ vars.DS4_MIN_TPS || '8' }}
+        run: |
+          chmod +x scripts/smoke-test.sh
+          ./scripts/smoke-test.sh "${{ steps.unpack.outputs.dir }}"
+
+  release:
+    needs: [prepare, build, test]
     runs-on: ubuntu-22.04
     if: >
       (github.event_name == 'workflow_dispatch' && github.event.inputs.create_release != 'false') ||
