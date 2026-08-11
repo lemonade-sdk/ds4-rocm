@@ -12,8 +12,11 @@
 set -euo pipefail
 
 BUNDLE="${1:?usage: smoke-test.sh <unpacked-bundle-dir>}"
-MODEL="${MODEL:?set MODEL to a DeepSeek-V4-Flash GGUF}"
+# Optional: the inference stage needs ~81 GiB resident, so it only runs where a
+# model is available and the box is big enough. Link-level checks always run.
+MODEL="${MODEL:-}"
 MIN_TPS="${MIN_TPS:-8}"          # conservative: measured ~16-17 t/s on gfx1151
+EXPECT_ARCH="${EXPECT_ARCH:-gfx1151}"
 TOKENS="${TOKENS:-64}"
 CTX="${CTX:-4096}"
 
@@ -21,7 +24,6 @@ say() { printf '==> %s\n' "$*"; }
 fail() { printf '!!! %s\n' "$*" >&2; exit 1; }
 
 [ -d "$BUNDLE" ] || fail "bundle dir not found: $BUNDLE"
-[ -f "$MODEL" ]  || fail "model not found: $MODEL"
 
 # ds4 refuses to start while another instance is running, so one leftover
 # process — a cancelled job, an interrupted run, someone's session — blocks
@@ -57,17 +59,58 @@ if [ -n "$outside" ]; then
     fail "ROCm libraries resolved outside the bundle"
 fi
 
-# 2. It must actually run on the GPU and produce the right answer. Greedy, so
-# the expected output is deterministic.
-say "running inference on gfx1151"
+# 2. The binaries must load and run. Both bundling bugs this pipeline has hit
+# (a missing liborigami, a dangling SONAME) failed here — at dynamic-link time,
+# before main — so this catches them without needing a model. LD_BIND_NOW forces
+# every symbol to resolve up front rather than lazily.
+say "executing the binaries with full symbol resolution"
+for b in ds4 ds4-server ds4-bench ds4-eval ds4-agent; do
+    [ -x "./$b" ] || fail "missing binary: $b"
+    LD_BIND_NOW=1 timeout 120 "./$b" --help >/dev/null 2>&1 || fail "$b failed to load and run"
+done
+
+# 3. The host has to be the architecture this bundle was compiled for, or the
+# inference stage below is meaningless.
+# Matched with a case rather than `| grep -q`: under `set -o pipefail`, grep -q
+# exits at the first match, the producer takes SIGPIPE, and a successful match
+# reads as a failed pipeline.
+if command -v rocminfo >/dev/null 2>&1; then
+    arch_out=$(rocminfo 2>/dev/null || true)
+    case "$arch_out" in
+        *"$EXPECT_ARCH"*) say "host reports $EXPECT_ARCH" ;;
+        *) fail "host does not report $EXPECT_ARCH" ;;
+    esac
+fi
+
+# 4. Inference, where the hardware can hold the model. A 64 GiB box cannot make
+# an 80.76 GiB model resident at any gttsize, so this stage is skipped there
+# rather than failing a build that is fine.
+if [ -z "$MODEL" ]; then
+    say "SKIPPED inference: no MODEL set"
+    say "link-level checks passed"
+    exit 0
+fi
+if [ ! -f "$MODEL" ]; then
+    fail "MODEL is set but not found: $MODEL"
+fi
+ram_gib=$(awk '/MemTotal/{printf "%d", $2/1048576}' /proc/meminfo)
+if [ "$ram_gib" -lt "${MIN_RAM_GIB:-100}" ]; then
+    say "SKIPPED inference: host has ${ram_gib} GiB RAM, need >= ${MIN_RAM_GIB:-100}"
+    say "link-level checks passed"
+    exit 0
+fi
+
+say "running inference on $EXPECT_ARCH"
 out=$(timeout 1800 ./ds4 -m "$MODEL" \
         -p "In one sentence, what is the capital of France?" \
         -n "$TOKENS" --temp 0 -c "$CTX" 2>&1) || fail "ds4 exited non-zero:\n$out"
 
 printf '%s\n' "$out" | tail -5
 
-printf '%s' "$out" | grep -qi "paris" \
-    || fail "model did not produce the expected answer"
+case "$(printf '%s' "$out" | tr 'A-Z' 'a-z')" in
+    *paris*) ;;
+    *) fail "model did not produce the expected answer" ;;
+esac
 
 # 3. Guard against a build that runs but is badly slower — a broken kernel
 # selection or a CPU fallback would still answer correctly, just slowly.

@@ -167,6 +167,9 @@ jobs:
           echo "dir=$dir" >> "$GITHUB_OUTPUT"
 
       - name: Ensure the test model is cached on the runner
+        # Only worth fetching where it can actually be loaded; the smallest
+        # quant is 80.76 GiB resident.
+        if: ${{ vars.DS4_ENABLE_INFERENCE_TEST == 'true' }}
         id: model
         env:
           MODEL_DIR: ${{ vars.DS4_MODEL_DIR || '/opt/ds4-models' }}
@@ -186,6 +189,7 @@ jobs:
         env:
           MODEL: ${{ steps.model.outputs.path }}
           MIN_TPS: ${{ vars.DS4_MIN_TPS || '8' }}
+          MIN_RAM_GIB: ${{ vars.DS4_MIN_RAM_GIB || '100' }}
         run: |
           chmod +x scripts/smoke-test.sh
           ./scripts/smoke-test.sh "${{ steps.unpack.outputs.dir }}"

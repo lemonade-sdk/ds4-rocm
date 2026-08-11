@@ -80,13 +80,29 @@ GPU, so a green build only proves the bundle is *self-contained* — not that it
 runs. Both bugs this pipeline has hit (a missing `liborigami`, a dangling
 SONAME) were invisible until something executed the binary.
 
-So publishing is gated on a **self-hosted gfx1151 runner**
-(`scripts/smoke-test.sh`), which checks that:
+So publishing is gated on a self-hosted gfx1151 runner
+(`scripts/smoke-test.sh`). It runs in two tiers, because the two things worth
+checking need very different machines.
+
+**Always, on any gfx1151 runner:**
 
 * every ROCm library resolves inside the bundle, not from a system install
+* every binary loads and runs under `LD_BIND_NOW`, so all symbols resolve up
+  front. Both bundling bugs this pipeline has hit — a missing `liborigami`, a
+  dangling SONAME — failed exactly here, at dynamic-link time before `main`,
+  which is why this tier is the one that has actually caught things
+* the host reports the architecture the bundle was compiled for
+
+**Only where the model fits** (`MODEL` set and >= `MIN_RAM_GIB`, default 100):
+
 * the model loads on the GPU and answers a greedy prompt correctly
 * generation throughput clears a floor, so a CPU fallback or a bad kernel
   selection fails rather than shipping quietly
+
+The smallest DeepSeek-V4-Flash quant is **80.76 GiB resident**, so inference
+cannot be tested on a 64 GB box at any `gttsize` — the tier is skipped there
+rather than failing a build that is fine. Point `GFX1151_RUNNER_LABELS` at a
+128 GB runner with ~100 GB of free disk to enable it.
 
 If the test fails, that day's build is simply not published.
 
@@ -97,6 +113,7 @@ Repository variables (all optional):
 | `GFX1151_RUNNER_LABELS` | `["self-hosted","stx-halo","Linux"]` | JSON array of runner labels |
 | `DS4_MODEL_DIR` | `/opt/ds4-models` | where the 81 GiB test model is cached |
 | `DS4_MIN_TPS` | `8` | throughput floor (measured ~16-17 t/s) |
+| `DS4_MIN_RAM_GIB` | `100` | below this, the inference tier is skipped |
 
 The test model is downloaded once and reused; a daily 81 GiB re-download would
 be untenable.
