@@ -73,6 +73,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
+    outputs:
+      # With a matrix this is last-writer-wins, which is fine: every target in a
+      # run resolves the same TheRock version. It is recorded so a release can
+      # be reproduced exactly.
+      rocm_version: ${{ steps.rocm.outputs.rocm_version }}
     steps:
       - uses: actions/checkout@v4
 
@@ -193,7 +198,7 @@ jobs:
             --notes "**Build Number**: ${{ steps.tag.outputs.tag }}
           **Operating System(s)**: ubuntu
           **GPU Target(s)**: ${{ env.GFX_TARGETS }}
-          **ROCm Version**: see asset build log
+          **ROCm Version**: ${{ needs.build.outputs.rocm_version }}
           **ds4 Commit Hash**: ${{ needs.prepare.outputs.ds4_sha }}
           **Build Date**: $(date -u '+%Y-%m-%d %H:%M:%S UTC')
 
