@@ -27,6 +27,12 @@ jobs:
           echo "hostname    : $(hostname)"
           echo "os          : $(uname -srm)"
           echo "labels asked: ${{ inputs.labels }}"
+      - name: Report capacity
+        run: |
+          echo "RAM total : $(awk '/MemTotal/{printf "%.0f GiB", $2/1048576}' /proc/meminfo)"
+          echo "disk free : $(df -h --output=avail / | tail -1 | tr -d ' ') on /"
+          echo "cmdline   : $(cat /proc/cmdline)"
+
       - name: Report the GPU
         run: |
           if command -v rocminfo >/dev/null 2>&1; then
