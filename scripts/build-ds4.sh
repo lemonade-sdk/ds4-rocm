@@ -65,18 +65,34 @@ done
 # Bundle the ROCm runtime so the target host needs no system ROCm. Copy what the
 # binaries actually link plus the hipBLASLt/rocBLAS tuning data they load at
 # runtime (those directories are the bulk of the payload).
-say "Bundling ROCm runtime"
+say "Bundling ROCm runtime (transitive closure)"
 # -L matters: $ROCM_DIR/lib is a symlink on distro ROCm installs, and find will
 # not descend into a symlinked directory without it (silently bundling nothing).
 LIB_DIR="$(readlink -f "$ROCM_DIR/lib")"
-copy_lib() {
-    local pat=$1
-    find -L "$LIB_DIR" -maxdepth 1 -name "$pat" -exec cp -P {} "$OUT_DIR/" \; 2>/dev/null || true
-}
-for pat in 'libamdhip64.so*' 'libhipblas.so*' 'libhipblaslt.so*' 'librocblas.so*' \
-           'libamd_comgr.so*' 'libhsa-runtime64.so*' 'librocprofiler-register.so*' \
-           'libLLVM*.so*' 'libroctx64.so*' 'libhsakmt.so*'; do
-    copy_lib "$pat"
+
+# Walk NEEDED entries transitively rather than copying a hardcoded list of
+# library names. ROCm distributions differ in what they pull in — TheRock's
+# hipBLASLt needs liborigami, distro ROCm does not — and a fixed list silently
+# produces a bundle that only runs on the machine that built it.
+declare -A SEEN=()
+queue=()
+for b in $BINS; do queue+=("$OUT_DIR/$b"); done
+while [ ${#queue[@]} -gt 0 ]; do
+    cur="${queue[0]}"; queue=("${queue[@]:1}")
+    [ -f "$cur" ] || continue
+    while read -r need; do
+        [ -n "$need" ] || continue
+        [ -n "${SEEN[$need]:-}" ] && continue
+        SEEN[$need]=1
+        src="$LIB_DIR/$need"
+        [ -e "$src" ] || continue          # not ROCm-provided; base system lib
+        cp -a "$src" "$OUT_DIR/" 2>/dev/null || true
+        real="$(readlink -f "$src")"
+        if [ "$real" != "$src" ] && [ -e "$real" ]; then
+            cp -a "$real" "$OUT_DIR/" 2>/dev/null || true
+        fi
+        queue+=("$real")
+    done < <(objdump -p "$cur" 2>/dev/null | awk '/NEEDED/{print $2}')
 done
 for d in hipblaslt rocblas; do
     [ -d "$LIB_DIR/$d" ] && cp -a "$LIB_DIR/$d" "$OUT_DIR/" || true
@@ -94,19 +110,38 @@ done
 after=$(du -sm "$OUT_DIR" | cut -f1)
 say "tuning data pruned: ${before} MiB -> ${after} MiB"
 
-# Anything still resolving outside the bundle would break on a host without
-# ROCm, so report it rather than shipping a bundle that only works here.
-say "Checking for unbundled ROCm dependencies"
+# Verify against a base-system allowlist instead of a ROCm-name allowlist: any
+# NEEDED entry that is neither in the bundle nor part of a stock glibc/libstdc++
+# install would break on a host without ROCm. An earlier version of this check
+# only knew ROCm library names and happily passed a bundle missing liborigami,
+# which then failed at exec time.
+say "Verifying bundle is self-contained"
+is_base_lib() {
+    case "$1" in
+        libc.so.*|libm.so.*|libpthread.so.*|libdl.so.*|librt.so.*|ld-linux*|\
+        libstdc++.so.*|libgcc_s.so.*|libgomp.so.*|libnuma.so.*|libdrm*.so.*|\
+        libelf.so.*|libz.so.*|libzstd.so.*|libtinfo.so.*|libatomic.so.*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
 missing=0
-for b in $BINS; do
+for f in "$OUT_DIR"/*; do
+    [ -f "$f" ] || continue
+    file "$f" 2>/dev/null | grep -q ELF || continue
     while read -r lib; do
-        case "$lib" in
-            libamdhip64*|libhipblas*|libhipblaslt*|librocblas*|libamd_comgr*|libhsa-runtime64*|libhsakmt*)
-                [ -e "$OUT_DIR/$lib" ] || { echo "  MISSING: $lib (needed by $b)"; missing=1; } ;;
-        esac
-    done < <(objdump -p "$OUT_DIR/$b" 2>/dev/null | awk '/NEEDED/{print $2}')
+        [ -n "$lib" ] || continue
+        [ -e "$OUT_DIR/$lib" ] && continue
+        is_base_lib "$lib" && continue
+        echo "  MISSING: $lib (needed by $(basename "$f"))"
+        missing=1
+    done < <(objdump -p "$f" 2>/dev/null | awk '/NEEDED/{print $2}')
 done
-[ "$missing" -eq 0 ] && say "all ROCm deps bundled" || echo "!!! bundle incomplete (see above)"
+if [ "$missing" -eq 0 ]; then
+    say "bundle is self-contained"
+else
+    echo "!!! bundle incomplete — it would fail on a host without ROCm" >&2
+    exit 1
+fi
 
 echo "$DS4_SHA" > "$OUT_DIR/ds4-commit.txt"
 say "Staged $(du -sh "$OUT_DIR" | cut -f1) in $OUT_DIR"
