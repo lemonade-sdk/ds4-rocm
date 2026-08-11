@@ -93,21 +93,25 @@ fi
 if [ ! -f "$MODEL" ]; then
     fail "MODEL is set but not found: $MODEL"
 fi
-# Capacity is GPU-accessible memory, not system RAM. Strix Halo can be
-# configured either way round: a large BIOS VRAM carve-out with a small GTT
-# aperture, or minimal VRAM with GTT raised to most of RAM. Both can hold the
-# model; only their sum matters.
-gpu_gib=0
+# Capacity is the largest single GPU memory pool, not system RAM and not the
+# sum of the pools. ds4 allocates its model arena from device memory and does
+# not spill into GTT: on a box with a 64 GiB BIOS VRAM carve-out and a 31 GiB
+# GTT aperture it OOMs at the 64 GiB boundary despite 95 GiB "available".
+# Strix Halo is usable either way round — minimal BIOS VRAM with GTT raised to
+# most of RAM, or a large carve-out — but one pool has to be big enough alone.
+pool_gib=0
 for f in /sys/class/drm/card*/device/mem_info_vram_total /sys/class/drm/card*/device/mem_info_gtt_total; do
     [ -e "$f" ] || continue
-    gpu_gib=$(( gpu_gib + $(cat "$f") / 1024 / 1024 / 1024 ))
+    this_gib=$(( $(cat "$f") / 1024 / 1024 / 1024 ))
+    [ "$this_gib" -gt "$pool_gib" ] && pool_gib=$this_gib
 done
-if [ "$gpu_gib" -lt "${MIN_GPU_GIB:-90}" ]; then
-    say "SKIPPED inference: ${gpu_gib} GiB GPU-accessible (VRAM+GTT), need >= ${MIN_GPU_GIB:-90}"
+if [ "$pool_gib" -lt "${MIN_GPU_GIB:-90}" ]; then
+    say "SKIPPED inference: largest GPU memory pool is ${pool_gib} GiB, need >= ${MIN_GPU_GIB:-90}"
+    say "  (reduce the BIOS VRAM carve-out and raise the GTT aperture to enable it)"
     say "link-level checks passed"
     exit 0
 fi
-say "GPU-accessible memory: ${gpu_gib} GiB"
+say "largest GPU memory pool: ${pool_gib} GiB"
 
 say "running inference on $EXPECT_ARCH"
 out=$(timeout 1800 ./ds4 -m "$MODEL" \

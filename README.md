@@ -99,10 +99,16 @@ checking need very different machines.
 * generation throughput clears a floor, so a CPU fallback or a bad kernel
   selection fails rather than shipping quietly
 
-The smallest DeepSeek-V4-Flash quant is **80.76 GiB resident**, so inference
-cannot be tested on a 64 GB box at any `gttsize` — the tier is skipped there
-rather than failing a build that is fine. Point `GFX1151_RUNNER_LABELS` at a
-128 GB runner with ~100 GB of free disk to enable it.
+The smallest DeepSeek-V4-Flash quant is **80.76 GiB resident**, and ds4
+allocates its model arena from device memory without spilling into GTT. So what
+matters is the **largest single GPU memory pool**, not system RAM and not the
+sum of VRAM and GTT: a host with a 64 GiB BIOS VRAM carve-out and a 31 GiB GTT
+aperture OOMs at the 64 GiB boundary despite 95 GiB nominally available.
+
+Strix Halo works either way round — minimal BIOS VRAM with the GTT aperture
+raised to most of RAM (see `scripts/setup-box.sh` in the sibling repo), or a
+large carve-out — but one pool has to exceed the model on its own. Where it does
+not, the inference tier is skipped rather than failing a build that is fine.
 
 If the test fails, that day's build is simply not published.
 
