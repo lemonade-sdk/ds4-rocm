@@ -41,6 +41,13 @@ jobs:
             echo "rocminfo not on PATH"
           fi
           for c in /sys/class/drm/card*/device/mem_info_gtt_total; do
-            [ -e "$c" ] && echo "GTT total: $(( $(cat "$c") / 1024 / 1024 / 1024 )) GiB"
+            [ -e "$c" ] && echo "GTT total : $(( $(cat "$c") / 1024 / 1024 / 1024 )) GiB"
           done
+          for c in /sys/class/drm/card*/device/mem_info_vram_total; do
+            [ -e "$c" ] && echo "VRAM total: $(( $(cat "$c") / 1024 / 1024 / 1024 )) GiB (BIOS carve-out)"
+          done
+          echo "--- all mounts with >50G free ---"
+          df -h --output=target,size,avail -x tmpfs -x devtmpfs 2>/dev/null | awk 'NR==1 || $3 ~ /[0-9]+(\.[0-9]+)?T/ || ($3 ~ /G$/ && $3+0 > 50)'
+          echo "--- block devices ---"
+          lsblk -o NAME,SIZE,MOUNTPOINT 2>/dev/null | head -12
           command -v hf >/dev/null 2>&1 && echo "hf CLI: present" || echo "hf CLI: MISSING (needed to seed the test model)"
